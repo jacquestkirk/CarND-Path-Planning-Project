@@ -8,6 +8,7 @@
 #include "Eigen-3.3/Eigen/Core"
 #include "Eigen-3.3/Eigen/QR"
 #include "json.hpp"
+#include "spline.h"
 
 using namespace std;
 
@@ -163,6 +164,13 @@ vector<double> getXY(double s, double d, const vector<double> &maps_s, const vec
 
 }
 
+double laneToD(int lane)
+{
+	const double lane_width_m = 4;
+	double d = (lane + 0.5) * lane_width_m; //calculate d, 0.5 is to move to middle of the lane
+	return d;
+}
+
 int main() {
   uWS::Hub h;
 
@@ -200,13 +208,25 @@ int main() {
   	map_waypoints_dy.push_back(d_y);
   }
 
-  h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
+  int lane = 1;
+  double ref_vel_mph = 0;
+
+#ifdef UWS_VCPKG
+  h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy, &lane, &ref_vel_mph](uWS::WebSocket<uWS::SERVER> *ws, char *data, size_t length,
                      uWS::OpCode opCode) {
+#else
+  h.onMessage([&map_waypoints_x, &map_waypoints_y, &map_waypoints_s, &map_waypoints_dx, &map_waypoints_dy, &lane, &ref_vel_mph](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
+	  uWS::OpCode opCode) {
+#endif
     // "42" at the start of the message means there's a websocket message event.
     // The 4 signifies a websocket message
     // The 2 signifies a websocket event
     //auto sdata = string(data).substr(0, length);
     //cout << sdata << endl;
+
+	double dt_s = 0.02;
+	double mphTomps = 0.447;
+
     if (length && length > 2 && data[0] == '4' && data[1] == '2') {
 
       auto s = hasData(data);
@@ -237,10 +257,208 @@ int main() {
           	// Sensor Fusion Data, a list of all other cars on the same side of the road.
           	auto sensor_fusion = j[1]["sensor_fusion"];
 
+
           	json msgJson;
 
-          	vector<double> next_x_vals;
-          	vector<double> next_y_vals;
+          	
+
+			double ref_x = car_x;
+			double ref_y = car_y;
+			double ref_yaw = deg2rad(car_yaw);
+			int prev_size = previous_path_x.size();
+
+
+			//////////////////////////////////////////////////////////////////////////////////////////////////
+			//sensor fusion
+
+			//take the s value from the end of the path
+			if (prev_size > 0)
+			{
+				car_s = end_path_s;
+			}
+
+			bool too_close = false;
+			double followSpeed_mph = 0;
+
+			//search through sensor fusion vector
+			for (int i = 0; i < sensor_fusion.size(); i++)
+			{
+				//check for car in lane
+				float d = sensor_fusion[i][6];
+				if ((d > laneToD(lane) - 2) && (d < laneToD(lane) + 2))
+				{
+					double vx = sensor_fusion[i][3];
+					double vy = sensor_fusion[i][4];
+					double check_speed = sqrt(pow(vx, 2) + pow(vy, 2));
+					double check_car_s = sensor_fusion[i][5];
+
+					check_car_s += (double)prev_size* dt_s * check_speed;	//extrapolate where the car will be in the furture
+
+					double buffer_m = 30;
+					if (check_car_s > car_s)
+					{
+						if ((check_car_s - car_s) < buffer_m)
+						{
+							too_close = true;
+							followSpeed_mph = check_speed / mphTomps *.9; //follow at slightly less than the lead car's speed
+
+
+							/*
+							Decide on lane change: 
+							1) Track leading and trailing car in each lane
+							2) Is the lane change safe? Check to make sure leading and trailing cars won't be with x feet
+							3) Cost:
+								- big points if there won't be a car withn 60?? meters. This means you can pull in front of the leading car
+								- points if the velocity of the leading car is faster than your lane, minus points if slower
+								- 5?? points for keepin in own lane, because it's simpler
+							*/
+							if (lane == 0)
+							{
+								lane += 1;
+							}
+							else
+							{
+								lane -= 1;
+							}
+						}
+
+					}
+				}
+
+
+			}
+
+			//if we haven't gotten too close, then speed back up to reference velocity
+			double target_v = 49.5;
+			double max_accel_mpss = 9.5;
+			if (too_close)
+			{
+				ref_vel_mph -= max_accel_mpss * dt_s / mphTomps;
+				if (ref_vel_mph < followSpeed_mph) // follow at the leading car's speed
+				{
+					ref_vel_mph = followSpeed_mph; 
+				}
+			}else if(ref_vel_mph < target_v)
+			{
+				ref_vel_mph += max_accel_mpss * dt_s / mphTomps;
+			}
+
+			///////////////////////////////////////////////////////////////////////////////////////////////////
+			//Build spline waypoints
+
+			vector<double> spline_ptsx;
+			vector<double> spline_ptsy;
+
+			
+			if (prev_size < 2) //if almost empty
+			{
+				//estimate previous location
+				double prev_car_x = car_x - cos(car_yaw);
+				double prev_car_y = car_y - sin(car_yaw);
+
+				//add the guess of where we have been
+				spline_ptsx.push_back(prev_car_x);
+				spline_ptsx.push_back(car_x);
+
+				spline_ptsy.push_back(prev_car_y);
+				spline_ptsy.push_back(car_y);
+			}
+			else
+			{
+				//calculate previous location
+				ref_x = previous_path_x[prev_size - 1];
+				ref_y = previous_path_y[prev_size - 1];
+
+				double prev_ref_x = previous_path_x[prev_size - 2];
+				double prev_ref_y = previous_path_y[prev_size - 2];
+				
+				//calculate yaw
+				ref_yaw = atan2(ref_y - prev_ref_y, ref_x - prev_ref_x);
+
+				//add the end of the path
+				spline_ptsx.push_back(prev_ref_x);
+				spline_ptsx.push_back(ref_x);
+
+				spline_ptsy.push_back(prev_ref_y);
+				spline_ptsy.push_back(ref_y);
+			}
+
+			//Add sparse points along the path
+			int spline_numSteps = 3;
+			int spline_step_m = 30;
+
+			for (int i = 0; i < spline_numSteps; i++)
+			{
+				double next_s = car_s + spline_step_m * (i + 1);
+				double next_d = laneToD(lane);
+
+				vector<double> next_xy = getXY(next_s, next_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+
+				double next_x = next_xy[0];
+				double next_y = next_xy[1];
+
+				spline_ptsx.push_back(next_x);
+				spline_ptsy.push_back(next_y);
+			}
+
+			//bring the points into the car's reference frame
+			for (int i = 0; i < spline_ptsx.size(); i++)
+			{
+				double shift_x = spline_ptsx[i] - ref_x;
+				double shift_y = spline_ptsy[i] - ref_y;
+
+				spline_ptsx[i] = (shift_x*cos(-ref_yaw) - shift_y * sin(-ref_yaw));
+				spline_ptsy[i] = (shift_x*sin(-ref_yaw) + shift_y * cos(-ref_yaw));
+			}
+
+			////////////////////////////////////////////////////
+			//create the spline
+			tk::spline s;
+			s.set_points(spline_ptsx, spline_ptsy);
+
+			///////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+			vector<double> next_x_vals;
+			vector<double> next_y_vals;
+
+			int path_size = previous_path_x.size();
+
+			//add the previous path points
+			for (int i = 0; i < path_size; i++)
+			{
+				next_x_vals.push_back(previous_path_x[i]);
+				next_y_vals.push_back(previous_path_y[i]);
+			}
+
+			//calculate the spacing along the spline for target velocity
+			
+			double horizon_x = 30;
+			double horizon_y = s(horizon_x);
+			double target_dist = sqrt(pow(horizon_x, 2) + pow(horizon_y, 2)); //pythagorean theorem, estimate the path as a line for this
+			double num_points = target_dist / (dt_s*ref_vel_mph*mphTomps);
+
+			double carRef_x = 0;
+			int numNextPts = 50;
+
+			for (int i = 0; i < numNextPts - path_size; i++)
+			{
+				carRef_x += horizon_x / num_points;
+				double carRef_y = s(carRef_x);
+
+				//transform back into map space
+				double rotate_x = (carRef_x*cos(ref_yaw) - carRef_y * sin(ref_yaw));
+				double rotate_y = (carRef_x*sin(ref_yaw) + carRef_y * cos(ref_yaw));
+
+				double mapRef_x = rotate_x + ref_x;
+				double mapRef_y = rotate_y + ref_y;
+
+				next_x_vals.push_back(mapRef_x);
+				next_y_vals.push_back(mapRef_y);
+
+			}
+
+		
+
 
 
           	// TODO: define a path made up of (x,y) points that the car will visit sequentially every .02 seconds
@@ -250,13 +468,25 @@ int main() {
           	auto msg = "42[\"control\","+ msgJson.dump()+"]";
 
           	//this_thread::sleep_for(chrono::milliseconds(1000));
-          	ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
+#ifdef UWS_VCPKG
+			// code fixed for latest uWebSockets
+			ws->send(msg.data(), msg.length(), uWS::OpCode::TEXT);
+#else
+			// leave original code here
+			ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
+#endif
           
         }
       } else {
         // Manual driving
         std::string msg = "42[\"manual\",{}]";
-        ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
+#ifdef UWS_VCPKG
+		// code fixed for latest uWebSockets
+		ws->send(msg.data(), msg.length(), uWS::OpCode::TEXT);
+#else
+		// leave original code here
+		ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
+#endif
       }
     }
   });
@@ -275,18 +505,35 @@ int main() {
     }
   });
 
+#ifdef UWS_VCPKG
+  // code fixed for latest uWebSockets
+  h.onConnection([&h](uWS::WebSocket<uWS::SERVER> *ws, uWS::HttpRequest req) {
+#else
+  // leave original code here
   h.onConnection([&h](uWS::WebSocket<uWS::SERVER> ws, uWS::HttpRequest req) {
-    std::cout << "Connected!!!" << std::endl;
+#endif
+	  std::cout << "Connected!!!" << std::endl;
   });
 
-  h.onDisconnection([&h](uWS::WebSocket<uWS::SERVER> ws, int code,
-                         char *message, size_t length) {
-    ws.close();
-    std::cout << "Disconnected" << std::endl;
+#ifdef UWS_VCPKG
+  // code fixed for latest uWebSockets
+  h.onDisconnection([&h](uWS::WebSocket<uWS::SERVER> *ws, int code, char *message, size_t length) {
+#else
+  // leave original code here
+  h.onDisconnection([&h](uWS::WebSocket<uWS::SERVER> ws, int code, char *message, size_t length) {
+#endif
+#ifdef UWS_VCPKG
+	  // code fixed for latest uWebSockets
+	  ws->close();
+#else
+	  // leave original code here
+	  ws.close();
+#endif
+	  std::cout << "Disconnected" << std::endl;
   });
 
   int port = 4567;
-  if (h.listen(port)) {
+  if (h.listen("127.0.0.1", port)){
     std::cout << "Listening to port " << port << std::endl;
   } else {
     std::cerr << "Failed to listen to port" << std::endl;
