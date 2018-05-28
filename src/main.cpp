@@ -171,6 +171,334 @@ double laneToD(int lane)
 	return d;
 }
 
+double dToLane(double d)
+{
+	for (int lane = 0; lane < 3; lane++)
+	{
+		if ((d > laneToD(lane) - 2) && (d < laneToD(lane) + 2))
+		{
+			return lane;
+		}
+
+	}
+
+	return 0; //if we got here we got problems
+}
+
+enum LaneDirection
+{
+	LaneDirection_left,
+	LaneDirection_right
+};
+
+enum Decisions
+{
+	Decisions_straight,
+	Decisions_left,
+	Decisions_right,
+};
+
+struct sensorFustionSummary
+{
+	double leadCarDist = 999;
+	double lefttLeadCarDist = 999;
+	double leftTailCarDist = 999;
+	double rightLeadCarDist = 999;
+	double rightTailCarDist = 999;
+	double laneSpeed[3] = { 0, 0, 0 };
+} SensorFusionSummary;
+
+struct decisionResult
+{
+	double speed;
+	int lane;
+} DecisionResult;
+
+
+int getNextLane(int lane, LaneDirection laneDirection)
+{
+	int nextLane;
+
+	if (lane == 0)
+	{
+		if (laneDirection == LaneDirection_left)
+		{
+			nextLane = -1;
+		}
+		else
+		{
+			nextLane = 1;
+		}
+
+	}
+
+	if (lane == 1)
+	{
+		if (laneDirection == LaneDirection_left)
+		{
+			nextLane = 0;
+		}
+		else
+		{
+			nextLane = 2;
+		}
+
+	}
+
+	if (lane == 2)
+	{
+		if (laneDirection == LaneDirection_left)
+		{
+			nextLane = 1;
+		}
+		else
+		{
+			nextLane = -1;
+		}
+
+	}
+
+	return nextLane;
+}
+
+sensorFustionSummary summarizeSensorFusion(int lane, double car_s, json sensor_fusion, double prev_size, double dt_s)
+{
+	sensorFustionSummary result = sensorFustionSummary();
+
+	//search through sensor fusion vector
+	for (int i = 0; i < sensor_fusion.size(); i++)
+	{
+
+		//pulls some info from the car in sensor fusion
+		double vx = sensor_fusion[i][3];
+		double vy = sensor_fusion[i][4];
+		double check_speed = sqrt(pow(vx, 2) + pow(vy, 2));
+		double check_car_s = sensor_fusion[i][5];
+		double check_car_s_future = check_car_s + prev_size* dt_s * check_speed;	//extrapolate where the car will be in the furture
+		float d = sensor_fusion[i][6];
+		double check_lane = dToLane((double)d);
+		double check_distance = check_car_s_future - car_s;
+
+
+		//Define left and right lanes, if invalid, they are set to -1
+		int leftLane = getNextLane(lane, LaneDirection_left);
+		int rightLane = getNextLane(lane, LaneDirection_right);
+
+		if (check_lane == lane)
+		{
+			//if in the lane check distance to lead car
+			if (check_distance > 0)
+			{
+				//find the closest car and log distance and speed
+
+				if (abs(result.leadCarDist) > check_distance)
+				{
+					result.leadCarDist = abs(check_distance);
+					result.laneSpeed[lane] = check_speed;
+				}
+				
+			}
+			
+		}
+		else if (check_lane == leftLane)
+		{
+			//if in the lane check distance to lead car
+			if (check_distance > 0)
+			{
+				//find the closest car and log distance and speed
+
+				if (abs(result.leadCarDist) > check_distance)
+				{
+					result.leftTailCarDist = abs(check_distance);
+					result.laneSpeed[leftLane] = check_speed;
+				}
+
+			}
+
+			//if in the lane check distance to tail car
+			if (check_distance <= 0)
+			{
+				//find the closest car and log distance and speed
+
+				if (abs(result.leadCarDist) > check_distance)
+				{
+					result.leftTailCarDist = abs(check_distance);
+					result.laneSpeed[leftLane] = check_speed;
+				}
+
+			}
+		}
+		else if (check_lane == rightLane)
+		{
+			//if in the lane check distance to lead car
+			if (check_distance > 0)
+			{
+				//find the closest car and log distance and speed
+
+				if (abs(result.leadCarDist) > check_distance)
+				{
+					result.rightLeadCarDist = abs(check_distance);
+					result.laneSpeed[rightLane] = check_speed;
+				}
+
+			}
+
+			//if in the lane check distance to tail car
+			if (check_distance <= 0)
+			{
+				//find the closest car and log distance and speed
+
+				if (abs(result.leadCarDist) > check_distance)
+				{
+					result.rightTailCarDist = abs(check_distance);
+					result.laneSpeed[rightLane] = check_speed;
+				}
+
+			}
+		}
+	}
+
+	return result;
+}
+
+decisionResult Decide(sensorFustionSummary summary, int lane, double ref_vel_mph, double dt_s)
+{
+	//define thresholds
+	double sameLaneDist_m = 30;
+	double laneChaneDist_m = 30;
+	double openLaneDist_m = 60;
+	double target_v = 49.5;
+	double straightBonus = 0;
+
+
+	//Check for collisions when merging left or right
+
+	bool allowMergeLeft = true;
+	bool allowMergeRight = true;
+
+	if ((summary.lefttLeadCarDist < laneChaneDist_m)||(getNextLane(lane, LaneDirection_left)<0))
+	{
+		allowMergeLeft = false;
+	}
+	if ((summary.leftTailCarDist < laneChaneDist_m)||(getNextLane(lane, LaneDirection_left)<0))
+	{
+		allowMergeLeft = false;
+	}
+
+	if ((summary.rightLeadCarDist< laneChaneDist_m)||(getNextLane(lane, LaneDirection_right)<0))
+	{
+		allowMergeRight = false;
+	}
+	if ((summary.rightTailCarDist < laneChaneDist_m)||(getNextLane(lane, LaneDirection_right)<0))
+	{
+		allowMergeRight = false;
+	}
+
+	//calculate speed cost
+	double speedCost[] = { 0,0,0 };
+
+	for (int i = 0; i < 3; i++)
+	{
+		speedCost[i] = abs(summary.laneSpeed[i] - target_v);
+	}
+
+
+	//calculate open lane bonus
+	double openBonusStraight = summary.leadCarDist - openLaneDist_m;
+	if (openBonusStraight < 0)
+	{
+		openBonusStraight = 0;
+	}
+
+	double openBonusLeft = summary.lefttLeadCarDist - openLaneDist_m;
+	if (openBonusLeft < 0)
+	{
+		openBonusLeft = 0;
+	}
+
+	double openBonusRight = summary.rightLeadCarDist - openLaneDist_m;
+	if (openBonusRight < 0)
+	{
+		openBonusRight = 0;
+	}
+
+
+	double straightCost = speedCost[lane] - straightBonus- openBonusStraight;
+	double leftCost = speedCost[getNextLane(lane, LaneDirection_left)]- openBonusLeft;
+	double rightCost = speedCost[getNextLane(lane, LaneDirection_right)] - openBonusRight;
+
+	
+
+
+	//start with going straight
+	Decisions bestDecision = Decisions_straight;
+	double bestCost = straightCost;
+	int bestLane = lane;
+
+	//check left
+	if (allowMergeLeft)
+	{
+		if (leftCost < bestCost)
+		{
+			bestDecision = Decisions_left;
+			bestCost = leftCost;
+			bestLane = getNextLane(lane, LaneDirection_left);
+		}
+	}
+
+	//check right
+	if (allowMergeRight)
+	{
+		if (rightCost < bestCost)
+		{
+			bestDecision = Decisions_right;
+			bestCost = rightCost;
+			bestLane = getNextLane(lane, LaneDirection_right);
+		}
+	}
+
+
+	//if we haven't gotten too close, then speed back up to reference velocity
+	double max_accel_mpss = 9.5;
+	double mphTomps = 0.447;
+	double new_speed = ref_vel_mph;
+	int new_lane = lane;
+
+
+
+	if (summary.leadCarDist < sameLaneDist_m)
+	{
+		new_lane = bestLane;
+
+		//slow down if we got too close to the car in our lane
+		if (bestDecision == Decisions_straight)
+		{
+			//slow down if our best decision is to stay in the same lane
+			new_speed = ref_vel_mph - max_accel_mpss * dt_s / mphTomps;
+			if (ref_vel_mph < summary.laneSpeed[lane]) // follow at slightly less than the leading car's speed
+			{
+				new_speed = summary.laneSpeed[lane] * 0.9;
+			}
+		}
+	}
+	else if (ref_vel_mph < target_v)
+	{
+		new_speed = ref_vel_mph + max_accel_mpss * dt_s / mphTomps;
+	}
+
+
+	decisionResult result = decisionResult();
+	result.lane = new_lane;
+	result.speed = new_speed;
+
+	
+
+
+	return result;
+	
+
+}
+
 int main() {
   uWS::Hub h;
 
@@ -277,71 +605,16 @@ int main() {
 				car_s = end_path_s;
 			}
 
-			bool too_close = false;
-			double followSpeed_mph = 0;
+			sensorFustionSummary summary =  summarizeSensorFusion(lane, car_s, sensor_fusion, prev_size, dt_s);
+			decisionResult decision = Decide(summary, lane, ref_vel_mph, dt_s);
 
-			//search through sensor fusion vector
-			for (int i = 0; i < sensor_fusion.size(); i++)
-			{
-				//check for car in lane
-				float d = sensor_fusion[i][6];
-				if ((d > laneToD(lane) - 2) && (d < laneToD(lane) + 2))
-				{
-					double vx = sensor_fusion[i][3];
-					double vy = sensor_fusion[i][4];
-					double check_speed = sqrt(pow(vx, 2) + pow(vy, 2));
-					double check_car_s = sensor_fusion[i][5];
+			lane = decision.lane;
+			ref_vel_mph = decision.speed;
 
-					check_car_s += (double)prev_size* dt_s * check_speed;	//extrapolate where the car will be in the furture
+			//cout << lane << endl;
+			//cout << ref_vel_mph << endl;
+			//cout << "-----------" << endl;
 
-					double buffer_m = 30;
-					if (check_car_s > car_s)
-					{
-						if ((check_car_s - car_s) < buffer_m)
-						{
-							too_close = true;
-							followSpeed_mph = check_speed / mphTomps *.9; //follow at slightly less than the lead car's speed
-
-
-							/*
-							Decide on lane change: 
-							1) Track leading and trailing car in each lane
-							2) Is the lane change safe? Check to make sure leading and trailing cars won't be with x feet
-							3) Cost:
-								- big points if there won't be a car withn 60?? meters. This means you can pull in front of the leading car
-								- points if the velocity of the leading car is faster than your lane, minus points if slower
-								- 5?? points for keepin in own lane, because it's simpler
-							*/
-							if (lane == 0)
-							{
-								lane += 1;
-							}
-							else
-							{
-								lane -= 1;
-							}
-						}
-
-					}
-				}
-
-
-			}
-
-			//if we haven't gotten too close, then speed back up to reference velocity
-			double target_v = 49.5;
-			double max_accel_mpss = 9.5;
-			if (too_close)
-			{
-				ref_vel_mph -= max_accel_mpss * dt_s / mphTomps;
-				if (ref_vel_mph < followSpeed_mph) // follow at the leading car's speed
-				{
-					ref_vel_mph = followSpeed_mph; 
-				}
-			}else if(ref_vel_mph < target_v)
-			{
-				ref_vel_mph += max_accel_mpss * dt_s / mphTomps;
-			}
 
 			///////////////////////////////////////////////////////////////////////////////////////////////////
 			//Build spline waypoints
