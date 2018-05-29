@@ -291,7 +291,7 @@ sensorFustionSummary summarizeSensorFusion(int lane, double car_s, json sensor_f
 			{
 				//find the closest car and log distance and speed
 
-				if (abs(result.leadCarDist) > check_distance)
+				if (abs(result.leadCarDist) > abs(check_distance))
 				{
 					result.leadCarDist = abs(check_distance);
 					result.laneSpeed[lane] = check_speed;
@@ -307,9 +307,9 @@ sensorFustionSummary summarizeSensorFusion(int lane, double car_s, json sensor_f
 			{
 				//find the closest car and log distance and speed
 
-				if (abs(result.leadCarDist) > check_distance)
+				if (abs(result.lefttLeadCarDist) > abs(check_distance))
 				{
-					result.leftTailCarDist = abs(check_distance);
+					result.lefttLeadCarDist = abs(check_distance);
 					result.laneSpeed[leftLane] = check_speed;
 				}
 
@@ -320,10 +320,9 @@ sensorFustionSummary summarizeSensorFusion(int lane, double car_s, json sensor_f
 			{
 				//find the closest car and log distance and speed
 
-				if (abs(result.leadCarDist) > check_distance)
+				if (abs(result.leftTailCarDist) > abs(check_distance))
 				{
 					result.leftTailCarDist = abs(check_distance);
-					result.laneSpeed[leftLane] = check_speed;
 				}
 
 			}
@@ -335,7 +334,7 @@ sensorFustionSummary summarizeSensorFusion(int lane, double car_s, json sensor_f
 			{
 				//find the closest car and log distance and speed
 
-				if (abs(result.leadCarDist) > check_distance)
+				if (abs(result.rightLeadCarDist) > abs(check_distance))
 				{
 					result.rightLeadCarDist = abs(check_distance);
 					result.laneSpeed[rightLane] = check_speed;
@@ -348,10 +347,9 @@ sensorFustionSummary summarizeSensorFusion(int lane, double car_s, json sensor_f
 			{
 				//find the closest car and log distance and speed
 
-				if (abs(result.leadCarDist) > check_distance)
+				if (abs(result.rightTailCarDist) > abs(check_distance))
 				{
 					result.rightTailCarDist = abs(check_distance);
-					result.laneSpeed[rightLane] = check_speed;
 				}
 
 			}
@@ -371,6 +369,11 @@ decisionResult Decide(sensorFustionSummary summary, int lane, double ref_vel_mph
 	double straightBonus = 0;
 
 
+	//cout << "lead: " << summary.leadCarDist << endl;
+	//cout << "left lead: " << summary.lefttLeadCarDist << endl;
+	//cout << "left tail: " << summary.leftTailCarDist << endl;
+	//cout << "right lead: " << summary.rightLeadCarDist << endl;
+	//cout << "right tail: " << summary.rightTailCarDist << endl;
 	//Check for collisions when merging left or right
 
 	bool allowMergeLeft = true;
@@ -438,6 +441,7 @@ decisionResult Decide(sensorFustionSummary summary, int lane, double ref_vel_mph
 	//check left
 	if (allowMergeLeft)
 	{
+		
 		if (leftCost < bestCost)
 		{
 			bestDecision = Decisions_left;
@@ -470,14 +474,38 @@ decisionResult Decide(sensorFustionSummary summary, int lane, double ref_vel_mph
 	{
 		new_lane = bestLane;
 
+		/*cout << "cost straight: " << straightCost << endl;
+
+		if (allowMergeLeft)
+		{
+			cout << "cost left: " << leftCost << endl;
+		}
+		else
+		{
+			cout << "cost left: inf"  << endl;
+		}
+		if (allowMergeRight)
+		{
+			cout << "cost right: " << rightCost << endl;
+		}
+		else
+		{
+			cout << "cost right: inf" << endl;
+		}*/
+
 		//slow down if we got too close to the car in our lane
 		if (bestDecision == Decisions_straight)
 		{
 			//slow down if our best decision is to stay in the same lane
 			new_speed = ref_vel_mph - max_accel_mpss * dt_s / mphTomps;
-			if (ref_vel_mph < summary.laneSpeed[lane]) // follow at slightly less than the leading car's speed
+			if (new_speed < summary.laneSpeed[lane]/mphTomps) // follow at slightly less than the leading car's speed
 			{
-				new_speed = summary.laneSpeed[lane] * 0.9;
+				new_speed = summary.laneSpeed[lane] / mphTomps * 0.95;
+
+
+				//cout << summary.laneSpeed[lane] << endl;
+				//cout << new_speed << endl;
+				//cout << "---------" << endl;
 			}
 		}
 	}
@@ -604,6 +632,9 @@ int main() {
 			{
 				car_s = end_path_s;
 			}
+
+			//calculate the current lane
+			lane = dToLane(car_d);
 
 			sensorFustionSummary summary =  summarizeSensorFusion(lane, car_s, sensor_fusion, prev_size, dt_s);
 			decisionResult decision = Decide(summary, lane, ref_vel_mph, dt_s);
